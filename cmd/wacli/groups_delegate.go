@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/openclaw/wacli/internal/out"
 	"github.com/openclaw/wacli/internal/store"
@@ -167,11 +167,61 @@ func executeDelegatedGroupInviteLink(ctx context.Context, client groupDelegateCl
 	return sendDelegateResponse{OK: true, To: gjid.String(), Link: link}, nil
 }
 
-// executeDelegatedGroupInfo is the seam for running `groups info` on the
-// follow process (ADR-L7b). The skeleton has no behavior yet: the delegation
-// server does not dispatch it, so it always reports that it is unimplemented.
+// parseGroupInfoJID accepts group JIDs only, so a user, an empty value or
+// garbage is refused before the store or WhatsApp is touched (R-L6).
+func parseGroupInfoJID(raw string) (types.JID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return types.JID{}, fmt.Errorf("--jid is required")
+	}
+	gjid, err := parseGroupJID(raw)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("groups info needs a group jid ending in @g.us: %w", err)
+	}
+	return gjid, nil
+}
+
+// executeDelegatedGroupInfo runs `groups info` on the follow process, which
+// owns the store lock and the connected session. It persists the live result
+// so later local reads see the same participants (R-L10) and never answers
+// with the cached copy when the lookup fails (R-L2).
 func executeDelegatedGroupInfo(ctx context.Context, client groupInfoClient, db *store.DB, req sendDelegateRequest) (sendDelegateResponse, error) {
-	return sendDelegateResponse{}, errors.New("group_info delegation not implemented")
+	gjid, err := parseGroupInfoJID(req.To)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	info, err := client.GetGroupInfo(ctx, gjid)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if info == nil {
+		return sendDelegateResponse{}, fmt.Errorf("group info not found for %s", gjid.String())
+	}
+	if db != nil {
+		_ = persistGroupInfo(ctx, db, client, info)
+	}
+	return sendDelegateResponse{OK: true, Group: info}, nil
+}
+
+// writeGroupInfoResult keeps the direct and the delegated path printing the
+// same group info shape.
+func writeGroupInfoResult(flags *rootFlags, info *types.GroupInfo) error {
+	if flags.asJSON {
+		return out.WriteJSON(os.Stdout, info)
+	}
+	fmt.Fprintf(os.Stdout, "JID: %s\nName: %s\nOwner: %s\nType: %s\n",
+		info.JID.String(),
+		sanitize(info.GroupName.Name),
+		info.OwnerJID.String(),
+		groupKindLabel(info.IsParent, info.LinkedParentJID.String()),
+	)
+	if !info.LinkedParentJID.IsEmpty() {
+		fmt.Fprintf(os.Stdout, "Parent: %s\n", info.LinkedParentJID.String())
+	}
+	fmt.Fprintf(os.Stdout, "Created: %s\nParticipants: %d\n",
+		info.GroupCreated.Local().Format(time.RFC3339),
+		len(info.Participants),
+	)
+	return nil
 }
 
 // explainGroupDelegateError turns an older daemon's rejection into the action to take.

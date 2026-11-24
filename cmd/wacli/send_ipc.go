@@ -437,6 +437,10 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 		return executeDelegatedGroupCreate(ctx, a.WA(), a.DB(), req)
 	case groupInviteLinkKind:
 		return executeDelegatedGroupInviteLink(ctx, a.WA(), req)
+	case groupInfoKind:
+		// A live group lookup is free of message pacing, but it shares the
+		// serialized queue so a caller's deadline still bounds the wait.
+		return executeDelegatedGroupInfo(ctx, a.WA(), a.DB(), req)
 	default:
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send kind %q", req.Kind)
 	}
