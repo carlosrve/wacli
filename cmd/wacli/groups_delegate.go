@@ -197,7 +197,9 @@ func executeDelegatedGroupInfo(ctx context.Context, client groupInfoClient, db *
 		return sendDelegateResponse{}, fmt.Errorf("group info not found for %s", gjid.String())
 	}
 	if db != nil {
-		_ = persistGroupInfo(ctx, db, client, info)
+		if err := persistGroupInfo(ctx, db, client, info); err != nil {
+			return sendDelegateResponse{}, fmt.Errorf("group info fetched but not saved to the local store: %w", err)
+		}
 	}
 	return sendDelegateResponse{OK: true, Group: info}, nil
 }

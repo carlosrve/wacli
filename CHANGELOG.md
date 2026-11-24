@@ -4,6 +4,7 @@
 
 - Groups: delegate `groups create` and `groups invite link get`/`revoke` to a running `sync --follow`, so scripts can create groups and manage invite links without stopping sync; output is unchanged and the serialized queue keeps caller deadlines. Thanks @carlosrve (#583).
 - Groups: delegate `groups info` to a running `sync --follow`, so a live participant lookup no longer needs sync stopped; the delegated result updates the local copy, the output is unchanged, and `--read-only` can use it only through that running sync. Thanks @carlosrve.
+- Groups: `groups info` through a running `sync --follow` now fails instead of reporting a stale local copy when the live result cannot be saved. Thanks @carlosrve.
 
 ## 0.26.1 - 2026-11-15
 
