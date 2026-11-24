@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 const (
 	groupCreateKind     = "group_create"
 	groupInviteLinkKind = "group_invite_link"
+	groupInfoKind       = "group_info"
 )
 
 // groupDelegateClient is the part of the WhatsApp client that group creation
@@ -23,6 +25,13 @@ type groupDelegateClient interface {
 	groupJIDResolver
 	CreateGroup(context.Context, wa.CreateGroupRequest) (*types.GroupInfo, error)
 	GetGroupInviteLink(context.Context, types.JID, bool) (string, error)
+}
+
+// groupInfoClient is the part of the WhatsApp client that group info needs:
+// the group lookup plus the LID-to-PN resolver that persisting the result uses.
+type groupInfoClient interface {
+	groupJIDResolver
+	GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error)
 }
 
 type groupCreateOptions struct {
@@ -156,6 +165,13 @@ func executeDelegatedGroupInviteLink(ctx context.Context, client groupDelegateCl
 		return sendDelegateResponse{}, err
 	}
 	return sendDelegateResponse{OK: true, To: gjid.String(), Link: link}, nil
+}
+
+// executeDelegatedGroupInfo is the seam for running `groups info` on the
+// follow process (ADR-L7b). The skeleton has no behavior yet: the delegation
+// server does not dispatch it, so it always reports that it is unimplemented.
+func executeDelegatedGroupInfo(ctx context.Context, client groupInfoClient, db *store.DB, req sendDelegateRequest) (sendDelegateResponse, error) {
+	return sendDelegateResponse{}, errors.New("group_info delegation not implemented")
 }
 
 // explainGroupDelegateError turns an older daemon's rejection into the action to take.
