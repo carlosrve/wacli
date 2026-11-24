@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,65 +19,72 @@ func newGroupsInfoCmd(flags *rootFlags) *cobra.Command {
 		Use:   "info",
 		Short: "Fetch group info (live) and update local DB",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if strings.TrimSpace(jidStr) == "" {
-				return fmt.Errorf("--jid is required")
-			}
-			if err := flags.requireWritable(); err != nil {
-				return err
-			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			info, err := a.WA().GetGroupInfo(ctx, gjid)
-			if err != nil {
-				return err
-			}
-			if info == nil {
-				return fmt.Errorf("group info not found for %s", gjid.String())
-			}
-			if info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
-
-			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, info)
-			}
-
-			fmt.Fprintf(os.Stdout, "JID: %s\nName: %s\nOwner: %s\nType: %s\n",
-				info.JID.String(),
-				sanitize(info.GroupName.Name),
-				info.OwnerJID.String(),
-				groupKindLabel(info.IsParent, info.LinkedParentJID.String()),
-			)
-			if !info.LinkedParentJID.IsEmpty() {
-				fmt.Fprintf(os.Stdout, "Parent: %s\n", info.LinkedParentJID.String())
-			}
-			fmt.Fprintf(os.Stdout, "Created: %s\nParticipants: %d\n",
-				info.GroupCreated.Local().Format(time.RFC3339),
-				len(info.Participants),
-			)
-			return nil
+			return runGroupsInfo(ctx, flags, jidStr)
 		},
 	}
 	cmd.Flags().StringVar(&jidStr, "jid", "", "group JID (…@g.us)")
 	return cmd
+}
+
+// runGroupsInfo asks the running sync when this process cannot hold the store
+// lock, and is delegation-only under --read-only: a second live session would
+// evict the sync's (ADR-L1, ADR-L2).
+func runGroupsInfo(ctx context.Context, flags *rootFlags, jidStr string) error {
+	gjid, err := parseGroupInfoJID(jidStr)
+	if err != nil {
+		return err
+	}
+	if flags.isReadOnly() {
+		resp, err := delegateSend(ctx, flags, sendDelegateRequest{Kind: groupInfoKind, To: gjid.String()})
+		return finishGroupsInfoDelegation(flags, gjid, resp, err)
+	}
+
+	a, lk, err := newApp(ctx, flags, true, false)
+	if err != nil {
+		resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
+			Kind: groupInfoKind,
+			To:   gjid.String(),
+		})
+		if delegated {
+			return finishGroupsInfoDelegation(flags, gjid, resp, delegateErr)
+		}
+		return err
+	}
+	defer closeApp(a, lk)
+
+	if err := a.EnsureAuthed(ctx); err != nil {
+		return err
+	}
+	if err := a.Connect(ctx, false, nil); err != nil {
+		return err
+	}
+
+	info, err := a.WA().GetGroupInfo(ctx, gjid)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return fmt.Errorf("group info not found for %s", gjid.String())
+	}
+	_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
+	return writeGroupInfoResult(flags, info)
+}
+
+// finishGroupsInfoDelegation reports the delegated answer, translating an
+// unavailable sync and an older daemon into the action to take.
+func finishGroupsInfoDelegation(flags *rootFlags, gjid types.JID, resp sendDelegateResponse, err error) error {
+	if err != nil {
+		if errors.Is(err, errSendDelegateUnavailable) {
+			return fmt.Errorf("live query needs a running sync: start `wacli sync --follow` and run this again: %w", err)
+		}
+		return explainGroupDelegateError(err, groupInfoKind, "groups info")
+	}
+	if resp.Group == nil {
+		return fmt.Errorf("group info not found for %s", gjid.String())
+	}
+	return writeGroupInfoResult(flags, resp.Group)
 }
 
 func newGroupsRenameCmd(flags *rootFlags) *cobra.Command {

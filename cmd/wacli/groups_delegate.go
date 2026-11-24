@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/openclaw/wacli/internal/out"
 	"github.com/openclaw/wacli/internal/store"
@@ -15,6 +16,7 @@ import (
 const (
 	groupCreateKind     = "group_create"
 	groupInviteLinkKind = "group_invite_link"
+	groupInfoKind       = "group_info"
 )
 
 // groupDelegateClient is the part of the WhatsApp client that group creation
@@ -23,6 +25,13 @@ type groupDelegateClient interface {
 	groupJIDResolver
 	CreateGroup(context.Context, wa.CreateGroupRequest) (*types.GroupInfo, error)
 	GetGroupInviteLink(context.Context, types.JID, bool) (string, error)
+}
+
+// groupInfoClient is the part of the WhatsApp client that group info needs:
+// the group lookup plus the LID-to-PN resolver that persisting the result uses.
+type groupInfoClient interface {
+	groupJIDResolver
+	GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error)
 }
 
 type groupCreateOptions struct {
@@ -156,6 +165,65 @@ func executeDelegatedGroupInviteLink(ctx context.Context, client groupDelegateCl
 		return sendDelegateResponse{}, err
 	}
 	return sendDelegateResponse{OK: true, To: gjid.String(), Link: link}, nil
+}
+
+// parseGroupInfoJID accepts group JIDs only, so a user, an empty value or
+// garbage is refused before the store or WhatsApp is touched (R-L6).
+func parseGroupInfoJID(raw string) (types.JID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return types.JID{}, fmt.Errorf("--jid is required")
+	}
+	gjid, err := parseGroupJID(raw)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("groups info needs a group jid ending in @g.us: %w", err)
+	}
+	return gjid, nil
+}
+
+// executeDelegatedGroupInfo runs `groups info` on the follow process, which
+// owns the store lock and the connected session. It persists the live result
+// so later local reads see the same participants (R-L10) and never answers
+// with the cached copy when the lookup fails (R-L2).
+func executeDelegatedGroupInfo(ctx context.Context, client groupInfoClient, db *store.DB, req sendDelegateRequest) (sendDelegateResponse, error) {
+	gjid, err := parseGroupInfoJID(req.To)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	info, err := client.GetGroupInfo(ctx, gjid)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if info == nil {
+		return sendDelegateResponse{}, fmt.Errorf("group info not found for %s", gjid.String())
+	}
+	if db != nil {
+		if err := persistGroupInfo(ctx, db, client, info); err != nil {
+			return sendDelegateResponse{}, fmt.Errorf("group info fetched but not saved to the local store: %w", err)
+		}
+	}
+	return sendDelegateResponse{OK: true, Group: info}, nil
+}
+
+// writeGroupInfoResult keeps the direct and the delegated path printing the
+// same group info shape.
+func writeGroupInfoResult(flags *rootFlags, info *types.GroupInfo) error {
+	if flags.asJSON {
+		return out.WriteJSON(os.Stdout, info)
+	}
+	fmt.Fprintf(os.Stdout, "JID: %s\nName: %s\nOwner: %s\nType: %s\n",
+		info.JID.String(),
+		sanitize(info.GroupName.Name),
+		info.OwnerJID.String(),
+		groupKindLabel(info.IsParent, info.LinkedParentJID.String()),
+	)
+	if !info.LinkedParentJID.IsEmpty() {
+		fmt.Fprintf(os.Stdout, "Parent: %s\n", info.LinkedParentJID.String())
+	}
+	fmt.Fprintf(os.Stdout, "Created: %s\nParticipants: %d\n",
+		info.GroupCreated.Local().Format(time.RFC3339),
+		len(info.Participants),
+	)
+	return nil
 }
 
 // explainGroupDelegateError turns an older daemon's rejection into the action to take.
